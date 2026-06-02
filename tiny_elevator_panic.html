@@ -1,0 +1,754 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>Tiny Elevator Panic</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #0d1024;
+    touch-action: none;
+    font-family: Arial, Helvetica, sans-serif;
+  }
+  #game {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    display: block;
+    background: #0d1024;
+  }
+  #ui {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+  }
+  .screen {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    color: white;
+    text-align: center;
+    background: radial-gradient(circle at 50% 30%, rgba(255,220,98,.20), rgba(13,16,36,.96) 58%);
+    pointer-events: auto;
+    padding: 24px;
+    box-sizing: border-box;
+  }
+  .hidden { display: none; }
+  h1 {
+    margin: 0 0 10px;
+    font-size: clamp(40px, 12vw, 84px);
+    line-height: .85;
+    letter-spacing: -2px;
+    text-shadow: 0 10px 0 rgba(0,0,0,.25);
+  }
+  .tag {
+    max-width: 340px;
+    font-size: 16px;
+    opacity: .88;
+    line-height: 1.35;
+    margin-bottom: 24px;
+  }
+  button {
+    border: 0;
+    padding: 16px 30px;
+    border-radius: 999px;
+    font-weight: 900;
+    font-size: 18px;
+    color: #10121f;
+    background: linear-gradient(180deg, #fff26f, #ffb23f);
+    box-shadow: 0 10px 0 #9a4d15, 0 18px 35px rgba(0,0,0,.35);
+    transform: translateY(0);
+  }
+  button:active {
+    transform: translateY(5px);
+    box-shadow: 0 5px 0 #9a4d15, 0 10px 20px rgba(0,0,0,.35);
+  }
+  .small {
+    margin-top: 16px;
+    font-size: 12px;
+    opacity: .65;
+  }
+  #hud {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    color: white;
+    text-shadow: 0 2px 0 rgba(0,0,0,.4);
+  }
+  #scoreBox {
+    position: absolute;
+    top: env(safe-area-inset-top, 0px);
+    left: 0;
+    right: 0;
+    padding: 14px 16px 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    font-weight: 900;
+  }
+  #score {
+    font-size: 34px;
+    line-height: .9;
+  }
+  #best, #rank {
+    font-size: 12px;
+    opacity: .85;
+    margin-top: 5px;
+    text-align: left;
+  }
+  #hearts {
+    font-size: 24px;
+    letter-spacing: 2px;
+    text-align: right;
+  }
+  #combo {
+    position: absolute;
+    left: 50%;
+    top: calc(env(safe-area-inset-top, 0px) + 72px);
+    transform: translateX(-50%);
+    font-size: 20px;
+    font-weight: 900;
+    opacity: 0;
+    transition: opacity .12s;
+    white-space: nowrap;
+  }
+  #tip {
+    position: absolute;
+    left: 50%;
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 16px);
+    transform: translateX(-50%);
+    font-size: 12px;
+    opacity: .7;
+    white-space: nowrap;
+    font-weight: 800;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<div id="ui">
+  <div id="hud">
+    <div id="scoreBox">
+      <div>
+        <div id="score">0</div>
+        <div id="best">BEST 0</div>
+        <div id="rank">GLOBAL RANK #9999</div>
+      </div>
+      <div id="hearts">❤️❤️❤️</div>
+    </div>
+    <div id="combo"></div>
+    <div id="tip">DRAG THE RESCUE MATTRESS · AVOID HEAVY JUNK</div>
+  </div>
+
+  <div id="startScreen" class="screen">
+    <h1>TINY<br>ELEVATOR<br>PANIC</h1>
+    <div class="tag">Tiny guests are falling from a broken hotel. Drag the bouncy mattress, save streaks, dodge heavy junk, chase the global rank.</div>
+    <button id="startBtn">START RESCUE</button>
+    <div class="small">One finger control · Sound starts after tap</div>
+  </div>
+
+  <div id="gameOverScreen" class="screen hidden">
+    <h1 id="overTitle">PANIC<br>OVER</h1>
+    <div class="tag" id="overText">Saved 0 guests.</div>
+    <button id="restartBtn">TRY AGAIN</button>
+    <div class="small">Tip: do not catch anvils, fridges, or mystery boxes.</div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const startScreen = document.getElementById('startScreen');
+  const gameOverScreen = document.getElementById('gameOverScreen');
+  const startBtn = document.getElementById('startBtn');
+  const restartBtn = document.getElementById('restartBtn');
+  const scoreEl = document.getElementById('score');
+  const bestEl = document.getElementById('best');
+  const rankEl = document.getElementById('rank');
+  const heartsEl = document.getElementById('hearts');
+  const comboEl = document.getElementById('combo');
+  const overText = document.getElementById('overText');
+
+  let W = 0, H = 0, DPR = 1;
+  let state = 'start';
+  let last = 0;
+  let time = 0;
+  let spawnTimer = 0;
+  let junkTimer = 0;
+  let score = 0;
+  let saved = 0;
+  let lives = 3;
+  let combo = 0;
+  let best = Number(localStorage.getItem('tinyElevatorBest') || 0);
+  let guests = [];
+  let particles = [];
+  let floatTexts = [];
+  let mattress = { x: 0, y: 0, w: 150, h: 24, targetX: 0, squash: 0 };
+  let pointerDown = false;
+  let shake = 0;
+  let slowMo = 0;
+  let fever = 0;
+  let bgOffset = 0;
+  let audioCtx = null;
+  let musicTimer = null;
+
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const pick = arr => arr[(Math.random() * arr.length) | 0];
+
+  function resize() {
+    DPR = Math.min(2, window.devicePixelRatio || 1);
+    W = Math.floor(window.innerWidth);
+    H = Math.floor(window.innerHeight);
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    canvas.style.width = W + 'px';
+    canvas.style.height = H + 'px';
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    mattress.y = H - Math.max(92, H * 0.12);
+    mattress.w = clamp(W * 0.36, 116, 190);
+    if (!mattress.x) mattress.x = W / 2;
+    mattress.targetX = clamp(mattress.targetX || W / 2, mattress.w / 2 + 10, W - mattress.w / 2 - 10);
+  }
+
+  function ensureAudio() {
+    if (audioCtx) return;
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const master = audioCtx.createGain();
+    master.gain.value = 0.09;
+    master.connect(audioCtx.destination);
+
+    musicTimer = setInterval(() => {
+      if (!audioCtx || state !== 'play') return;
+      const now = audioCtx.currentTime;
+      const notes = [220, 247, 294, 330, 392, 330, 294, 247];
+      const freq = notes[Math.floor(time * 2) % notes.length];
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.exponentialRampToValueAtTime(0.12, now + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.18);
+      osc.connect(gain);
+      gain.connect(master);
+      osc.start(now);
+      osc.stop(now + 0.2);
+    }, 220);
+  }
+
+  function sfx(type) {
+    if (!audioCtx) return;
+    const now = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    gain.gain.value = 0.0001;
+    if (type === 'catch') {
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(520, now);
+      osc.frequency.exponentialRampToValueAtTime(920, now + 0.08);
+      gain.gain.exponentialRampToValueAtTime(0.18, now + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.16);
+      osc.start(now); osc.stop(now + 0.18);
+    } else if (type === 'hit') {
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(110, now);
+      osc.frequency.exponentialRampToValueAtTime(55, now + 0.22);
+      gain.gain.exponentialRampToValueAtTime(0.22, now + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.3);
+      osc.start(now); osc.stop(now + 0.32);
+    } else if (type === 'power') {
+      osc.type = 'square';
+      osc.frequency.setValueAtTime(360, now);
+      osc.frequency.exponentialRampToValueAtTime(1440, now + 0.16);
+      gain.gain.exponentialRampToValueAtTime(0.15, now + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.24);
+      osc.start(now); osc.stop(now + 0.26);
+    } else {
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(160, now);
+      gain.gain.exponentialRampToValueAtTime(0.14, now + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.2);
+      osc.start(now); osc.stop(now + 0.22);
+    }
+  }
+
+  function reset() {
+    score = 0;
+    saved = 0;
+    lives = 3;
+    combo = 0;
+    time = 0;
+    spawnTimer = 0.25;
+    junkTimer = 2.2;
+    guests = [];
+    particles = [];
+    floatTexts = [];
+    shake = 0;
+    slowMo = 0;
+    fever = 0;
+    mattress.x = W / 2;
+    mattress.targetX = W / 2;
+    updateHUD();
+  }
+
+  function startGame() {
+    ensureAudio();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    reset();
+    state = 'play';
+    startScreen.classList.add('hidden');
+    gameOverScreen.classList.add('hidden');
+    last = performance.now();
+    requestAnimationFrame(loop);
+  }
+
+  function endGame() {
+    state = 'over';
+    best = Math.max(best, score);
+    localStorage.setItem('tinyElevatorBest', String(best));
+    overText.innerHTML = `Saved <b>${saved}</b> guests · Score <b>${score}</b><br>${score >= 90 ? 'Hotel legend. This run is screenshot-worthy.' : score >= 45 ? 'Good run. Push combo harder.' : 'Too many panic drops. Move earlier.'}`;
+    updateHUD();
+    gameOverScreen.classList.remove('hidden');
+  }
+
+  function updateHUD() {
+    scoreEl.textContent = score;
+    bestEl.textContent = `BEST ${best}`;
+    const rank = Math.max(1, 9999 - score * 37 - Math.floor(saved * 9));
+    rankEl.textContent = `GLOBAL RANK #${rank}`;
+    heartsEl.textContent = '❤️'.repeat(lives) + '🖤'.repeat(3 - lives);
+    if (combo >= 3) {
+      comboEl.textContent = `${combo} RESCUE STREAK ×${1 + Math.floor(combo / 6)}`;
+      comboEl.style.opacity = '1';
+    } else {
+      comboEl.style.opacity = '0';
+    }
+  }
+
+  function spawnGuest(forceType) {
+    const isJunk = forceType === 'junk';
+    const isPower = forceType === 'power';
+    const size = isJunk ? rand(28, 42) : rand(25, 35);
+    const x = rand(42, W - 42);
+    const y = -size - rand(0, 40);
+    const speedBase = 170 + Math.min(180, time * 5.5);
+    guests.push({
+      x, y,
+      vx: rand(-38, 38),
+      vy: isJunk ? speedBase * 1.12 : speedBase * rand(0.88, 1.08),
+      r: size,
+      rot: rand(-0.8, 0.8),
+      spin: rand(-4, 4),
+      type: isJunk ? 'junk' : (isPower ? 'power' : 'guest'),
+      face: pick(['O', 'D', 'x', '^']),
+      color: isJunk ? pick(['#6d738b', '#8a4b4b', '#4b586b']) : pick(['#ffdf5d', '#79f2ff', '#ff8dbb', '#99ff9d', '#d7b4ff']),
+      accessory: pick(['hat','hair','none','glasses'])
+    });
+  }
+
+  function addParticles(x, y, color, n = 10) {
+    for (let i = 0; i < n; i++) {
+      particles.push({
+        x, y,
+        vx: rand(-180, 180),
+        vy: rand(-260, 40),
+        life: rand(0.35, 0.75),
+        max: 0.75,
+        size: rand(2, 6),
+        color
+      });
+    }
+  }
+
+  function addText(text, x, y, color = '#fff') {
+    floatTexts.push({ text, x, y, vy: -55, life: 0.9, color });
+  }
+
+  function catchGuest(g) {
+    if (g.type === 'junk') {
+      lives--;
+      combo = 0;
+      shake = 18;
+      mattress.squash = 1;
+      addParticles(g.x, g.y, '#ff5151', 20);
+      addText('OUCH!', g.x, g.y - 12, '#ff6b6b');
+      sfx('hit');
+      if (lives <= 0) endGame();
+      return;
+    }
+    if (g.type === 'power') {
+      slowMo = 4.2;
+      fever = 4.2;
+      mattress.squash = 1;
+      score += 6;
+      addParticles(g.x, g.y, '#7cf8ff', 22);
+      addText('SLOW MOTION!', g.x, g.y - 12, '#7cf8ff');
+      sfx('power');
+      updateHUD();
+      return;
+    }
+    combo++;
+    saved++;
+    const mult = 1 + Math.floor(combo / 6);
+    const gain = 3 * mult;
+    score += gain;
+    mattress.squash = 1;
+    fever = Math.max(fever, combo >= 8 ? 1.4 : 0);
+    addParticles(g.x, g.y, '#fff26f', 14 + Math.min(combo, 18));
+    addText(`+${gain}`, g.x, g.y - 20, '#fff26f');
+    if (combo === 5) addText('STREAK START!', W / 2, H * 0.25, '#fff26f');
+    if (combo > 0 && combo % 10 === 0) addText('HOTEL HERO!', W / 2, H * 0.24, '#ff8df4');
+    sfx('catch');
+    updateHUD();
+  }
+
+  function loseGuest(g) {
+    if (g.type === 'guest') {
+      lives--;
+      combo = 0;
+      shake = 12;
+      addParticles(g.x, H - 32, '#ff6b6b', 13);
+      addText('MISSED!', g.x, H - 44, '#ff6b6b');
+      sfx('fall');
+      if (lives <= 0) endGame();
+      updateHUD();
+    }
+  }
+
+  function update(dt) {
+    const scaleDt = slowMo > 0 ? dt * 0.55 : dt;
+    time += dt;
+    bgOffset += dt * (22 + Math.min(time * 1.4, 60));
+    slowMo = Math.max(0, slowMo - dt);
+    fever = Math.max(0, fever - dt);
+    shake = Math.max(0, shake - dt * 35);
+
+    mattress.x += (mattress.targetX - mattress.x) * clamp(dt * 16, 0, 1);
+    mattress.squash = Math.max(0, mattress.squash - dt * 5);
+    const extraW = (slowMo > 0 ? 42 : 0) + (fever > 0 ? 20 : 0);
+    const mx1 = mattress.x - (mattress.w + extraW) / 2;
+    const mx2 = mattress.x + (mattress.w + extraW) / 2;
+    const my = mattress.y;
+
+    spawnTimer -= dt;
+    const interval = clamp(0.92 - time * 0.012, 0.38, 0.92);
+    if (spawnTimer <= 0) {
+      spawnTimer = interval * rand(0.72, 1.18);
+      spawnGuest();
+      if (Math.random() < 0.08 && time > 15) spawnGuest();
+    }
+
+    junkTimer -= dt;
+    if (junkTimer <= 0) {
+      junkTimer = rand(2.2, 3.8) - Math.min(time * 0.015, 0.9);
+      spawnGuest(Math.random() < 0.22 ? 'power' : 'junk');
+    }
+
+    for (let i = guests.length - 1; i >= 0; i--) {
+      const g = guests[i];
+      g.x += g.vx * scaleDt;
+      g.y += g.vy * scaleDt;
+      g.rot += g.spin * scaleDt;
+      if (g.x < g.r || g.x > W - g.r) {
+        g.vx *= -0.75;
+        g.x = clamp(g.x, g.r, W - g.r);
+      }
+
+      const hitY = g.y + g.r * 0.55 >= my - 12 && g.y - g.r * 0.2 <= my + 26;
+      const hitX = g.x > mx1 - g.r * 0.35 && g.x < mx2 + g.r * 0.35;
+      if (hitY && hitX && g.vy > 0) {
+        catchGuest(g);
+        guests.splice(i, 1);
+        continue;
+      }
+      if (g.y - g.r > H + 60) {
+        loseGuest(g);
+        guests.splice(i, 1);
+      }
+    }
+
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.life -= dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.vy += 620 * dt;
+      if (p.life <= 0) particles.splice(i, 1);
+    }
+
+    for (let i = floatTexts.length - 1; i >= 0; i--) {
+      const f = floatTexts[i];
+      f.life -= dt;
+      f.y += f.vy * dt;
+      if (f.life <= 0) floatTexts.splice(i, 1);
+    }
+  }
+
+  function drawRoundedRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function drawBackground() {
+    const grad = ctx.createLinearGradient(0, 0, 0, H);
+    grad.addColorStop(0, '#12183f');
+    grad.addColorStop(.55, '#19225d');
+    grad.addColorStop(1, '#0b0d1e');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.save();
+    if (shake > 0) ctx.translate(rand(-shake, shake), rand(-shake, shake));
+
+    const floorH = 86;
+    ctx.fillStyle = '#11162f';
+    ctx.fillRect(0, H - floorH, W, floorH);
+    ctx.fillStyle = 'rgba(255,255,255,.06)';
+    for (let x = -40 + ((bgOffset * .5) % 80); x < W + 80; x += 80) {
+      ctx.fillRect(x, H - floorH + 22, 42, 7);
+    }
+
+    const buildingW = Math.min(W * .84, 420);
+    const bx = (W - buildingW) / 2;
+    ctx.fillStyle = '#1c2147';
+    drawRoundedRect(bx, -80, buildingW, H + 120, 26);
+    ctx.fill();
+
+    ctx.fillStyle = '#111631';
+    drawRoundedRect(bx + 16, -40, buildingW - 32, H + 60, 20);
+    ctx.fill();
+
+    const rows = Math.ceil(H / 82) + 3;
+    for (let r = -2; r < rows; r++) {
+      const y = ((r * 82 + (bgOffset % 82)) | 0) - 100;
+      for (let c = 0; c < 4; c++) {
+        const wx = bx + 35 + c * ((buildingW - 70) / 3);
+        const lit = (r + c + Math.floor(time * 1.5)) % 5 !== 0;
+        ctx.fillStyle = lit ? 'rgba(255,221,95,.18)' : 'rgba(88,110,170,.12)';
+        drawRoundedRect(wx - 22, y, 44, 46, 8);
+        ctx.fill();
+        ctx.fillStyle = lit ? 'rgba(255,239,144,.17)' : 'rgba(255,255,255,.04)';
+        ctx.fillRect(wx - 16, y + 6, 32, 3);
+      }
+    }
+
+    ctx.fillStyle = 'rgba(255,255,255,.07)';
+    ctx.fillRect(bx + buildingW / 2 - 3, 0, 6, H);
+    ctx.restore();
+  }
+
+  function drawGuest(g) {
+    ctx.save();
+    ctx.translate(g.x, g.y);
+    ctx.rotate(g.rot);
+
+    if (g.type === 'junk') {
+      ctx.fillStyle = g.color;
+      drawRoundedRect(-g.r * .58, -g.r * .45, g.r * 1.16, g.r * .9, 8);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,.25)';
+      ctx.lineWidth = 3;
+      ctx.stroke();
+      ctx.fillStyle = '#121421';
+      ctx.font = `900 ${g.r * .44}px Arial`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(pick(['!', 'X', '??']), 0, 1);
+      ctx.restore();
+      return;
+    }
+
+    if (g.type === 'power') {
+      ctx.fillStyle = '#7cf8ff';
+      ctx.beginPath();
+      ctx.arc(0, 0, g.r * .55, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,.75)';
+      ctx.beginPath();
+      ctx.arc(-g.r * .16, -g.r * .14, g.r * .16, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#122035';
+      ctx.font = `900 ${g.r * .46}px Arial`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('S', 0, 2);
+      ctx.restore();
+      return;
+    }
+
+    ctx.fillStyle = g.color;
+    drawRoundedRect(-g.r * .42, -g.r * .62, g.r * .84, g.r * 1.24, g.r * .34);
+    ctx.fill();
+
+    ctx.fillStyle = '#f8d39b';
+    ctx.beginPath();
+    ctx.arc(0, -g.r * .4, g.r * .36, 0, Math.PI * 2);
+    ctx.fill();
+
+    if (g.accessory === 'hat') {
+      ctx.fillStyle = '#252a48';
+      ctx.fillRect(-g.r * .34, -g.r * .78, g.r * .68, g.r * .16);
+      drawRoundedRect(-g.r * .22, -g.r * .98, g.r * .44, g.r * .25, 6);
+      ctx.fill();
+    } else if (g.accessory === 'hair') {
+      ctx.fillStyle = '#2d1d16';
+      for (let i = -2; i <= 2; i++) {
+        ctx.beginPath();
+        ctx.arc(i * g.r * .12, -g.r * .7, g.r * .12, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    } else if (g.accessory === 'glasses') {
+      ctx.strokeStyle = '#16192b';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(-g.r * .12, -g.r * .42, g.r * .09, 0, Math.PI * 2);
+      ctx.arc(g.r * .12, -g.r * .42, g.r * .09, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    ctx.fillStyle = '#151827';
+    ctx.beginPath();
+    ctx.arc(-g.r * .12, -g.r * .43, 2.4, 0, Math.PI * 2);
+    ctx.arc(g.r * .12, -g.r * .43, 2.4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#151827';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    if (g.face === 'O') ctx.arc(0, -g.r * .30, g.r * .09, 0, Math.PI * 2);
+    else if (g.face === 'D') ctx.arc(0, -g.r * .31, g.r * .12, 0, Math.PI);
+    else if (g.face === 'x') { ctx.moveTo(-4, -g.r * .31); ctx.lineTo(4, -g.r * .25); ctx.moveTo(4, -g.r * .31); ctx.lineTo(-4, -g.r * .25); }
+    else { ctx.moveTo(-5, -g.r * .28); ctx.quadraticCurveTo(0, -g.r * .34, 5, -g.r * .28); }
+    ctx.stroke();
+
+    ctx.strokeStyle = g.color;
+    ctx.lineWidth = 4;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(-g.r * .35, -g.r * .1); ctx.lineTo(-g.r * .62, g.r * .18);
+    ctx.moveTo(g.r * .35, -g.r * .1); ctx.lineTo(g.r * .62, g.r * .18);
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  function drawMattress() {
+    const extraW = (slowMo > 0 ? 42 : 0) + (fever > 0 ? 20 : 0);
+    const w = mattress.w + extraW;
+    const squash = mattress.squash;
+    const h = mattress.h * (1 + squash * .55);
+    const y = mattress.y + squash * 4;
+
+    ctx.save();
+    ctx.translate(mattress.x, y);
+    ctx.shadowColor = fever > 0 ? 'rgba(255,242,111,.85)' : 'rgba(255,255,255,.24)';
+    ctx.shadowBlur = fever > 0 ? 22 : 10;
+    ctx.fillStyle = slowMo > 0 ? '#7cf8ff' : '#fff26f';
+    drawRoundedRect(-w / 2, -h / 2, w, h, 14);
+    ctx.fill();
+
+    ctx.fillStyle = 'rgba(0,0,0,.20)';
+    for (let i = -2; i <= 2; i++) {
+      ctx.fillRect(i * w / 6 - 4, -h / 2 + 4, 8, h - 8);
+    }
+
+    ctx.fillStyle = '#161827';
+    ctx.font = '900 13px Arial';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(slowMo > 0 ? 'SLOW RESCUE' : 'BOUNCE TEAM', 0, 0);
+    ctx.restore();
+  }
+
+  function drawParticlesAndText() {
+    for (const p of particles) {
+      ctx.globalAlpha = clamp(p.life / p.max, 0, 1);
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+    for (const f of floatTexts) {
+      ctx.globalAlpha = clamp(f.life, 0, 1);
+      ctx.fillStyle = f.color;
+      ctx.font = '900 22px Arial';
+      ctx.textAlign = 'center';
+      ctx.lineWidth = 5;
+      ctx.strokeStyle = 'rgba(0,0,0,.45)';
+      ctx.strokeText(f.text, f.x, f.y);
+      ctx.fillText(f.text, f.x, f.y);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  function draw() {
+    drawBackground();
+    ctx.save();
+    if (shake > 0) ctx.translate(rand(-shake, shake), rand(-shake, shake));
+    for (const g of guests) drawGuest(g);
+    drawMattress();
+    drawParticlesAndText();
+    ctx.restore();
+
+    if (slowMo > 0) {
+      ctx.fillStyle = 'rgba(124,248,255,.07)';
+      ctx.fillRect(0, 0, W, H);
+    }
+  }
+
+  function loop(now) {
+    if (state !== 'play') {
+      draw();
+      return;
+    }
+    const dt = Math.min(0.034, (now - last) / 1000 || 0.016);
+    last = now;
+    update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  function setPointer(x) {
+    mattress.targetX = clamp(x, mattress.w / 2 + 8, W - mattress.w / 2 - 8);
+  }
+
+  canvas.addEventListener('pointerdown', e => {
+    pointerDown = true;
+    setPointer(e.clientX);
+  });
+  canvas.addEventListener('pointermove', e => {
+    if (!pointerDown && state === 'play') return;
+    setPointer(e.clientX);
+  });
+  window.addEventListener('pointerup', () => pointerDown = false);
+  window.addEventListener('pointercancel', () => pointerDown = false);
+
+  startBtn.addEventListener('click', startGame);
+  restartBtn.addEventListener('click', startGame);
+  window.addEventListener('resize', resize);
+  resize();
+  updateHUD();
+  draw();
+})();
+</script>
+</body>
+</html>
