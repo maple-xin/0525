@@ -1,0 +1,878 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>Cart Chaos: One More Item</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #090914;
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
+    font-family: Inter, Arial, Helvetica, sans-serif;
+  }
+  #game {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+    background: #0b0b18;
+  }
+  #rotateHint {
+    position: fixed;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 28px;
+    text-align: center;
+    color: white;
+    background: #090914;
+    z-index: 5;
+    font-size: 20px;
+    line-height: 1.35;
+  }
+  @media (orientation: landscape) and (max-height: 520px) {
+    #rotateHint { display: flex; }
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="rotateHint">Rotate your phone upright for the best chaos.</div>
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  let W = 0, H = 0, DPR = 1;
+
+  const items = [
+    { id: 'pizza', icon: '🍕', color: '#ffcf5a' },
+    { id: 'donut', icon: '🍩', color: '#ff8bd1' },
+    { id: 'juice', icon: '🧃', color: '#64d9ff' },
+    { id: 'bear', icon: '🧸', color: '#d7a173' },
+    { id: 'cheese', icon: '🧀', color: '#ffd84e' },
+    { id: 'avocado', icon: '🥑', color: '#90e86c' },
+    { id: 'paper', icon: '🧻', color: '#eff5ff' },
+    { id: 'cake', icon: '🍰', color: '#ffc3df' }
+  ];
+  const hazards = [
+    { id: 'bomb', icon: '💣', color: '#fb3f5f' },
+    { id: 'banana', icon: '🍌', color: '#ffec5a' },
+    { id: 'trap', icon: '🪤', color: '#fb7d3f' },
+    { id: 'virus', icon: '🦠', color: '#72ff80' }
+  ];
+  const powers = [
+    { id: 'shield', icon: '🛡️', color: '#79e7ff' },
+    { id: 'magnet', icon: '🧲', color: '#ff6262' },
+    { id: 'slow', icon: '🧊', color: '#83ccff' }
+  ];
+
+  const state = {
+    mode: 'cover',
+    time: 0,
+    last: 0,
+    startedAt: 0,
+    score: 0,
+    best: Number(localStorage.getItem('cartChaosBest') || 0),
+    lives: 3,
+    combo: 1,
+    fever: 0,
+    feverTime: 0,
+    shieldTime: 0,
+    magnetTime: 0,
+    slowTime: 0,
+    shake: 0,
+    spawnTimer: 0,
+    bgOffset: 0,
+    queue: [],
+    objects: [],
+    particles: [],
+    floating: [],
+    receipt: [],
+    mute: false,
+    tutorial: true,
+    overReason: '',
+    rank: 'Cart Rookie'
+  };
+
+  const player = {
+    x: 0, y: 0, tx: 0, ty: 0, r: 34, vx: 0, vy: 0, tilt: 0, squash: 0
+  };
+
+  const input = { down: false, x: 0, y: 0, justMoved: false };
+
+  let audio = null;
+  let musicTimer = null;
+  let musicStep = 0;
+
+  function resize() {
+    DPR = Math.min(2, window.devicePixelRatio || 1);
+    W = Math.max(320, window.innerWidth);
+    H = Math.max(520, window.innerHeight);
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    canvas.style.width = W + 'px';
+    canvas.style.height = H + 'px';
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    if (!player.x) {
+      player.x = player.tx = W * 0.5;
+      player.y = player.ty = H * 0.78;
+    }
+  }
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function pick(arr) { return arr[(Math.random() * arr.length) | 0]; }
+  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+  function dist(a, b, c, d) { return Math.hypot(a - c, b - d); }
+  function easeOut(t) { return 1 - Math.pow(1 - t, 3); }
+
+  function initAudio() {
+    if (audio) {
+      if (audio.ctx.state === 'suspended') audio.ctx.resume();
+      return;
+    }
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    const ac = new AC();
+    const master = ac.createGain();
+    master.gain.value = 0.18;
+    master.connect(ac.destination);
+    audio = { ctx: ac, master };
+    if (musicTimer) clearInterval(musicTimer);
+    musicTimer = setInterval(() => {
+      if (!audio || state.mute || state.mode === 'cover') return;
+      const notes = [196, 247, 294, 330, 247, 392, 330, 294];
+      const f = notes[musicStep % notes.length] * (state.feverTime > 0 ? 1.5 : 1);
+      tone(f, 0.08, 'triangle', 0.055);
+      if (musicStep % 4 === 0) tone(98, 0.05, 'sine', 0.035);
+      musicStep++;
+    }, 170);
+  }
+
+  function tone(freq, dur = 0.08, type = 'sine', vol = 0.1) {
+    if (!audio || state.mute) return;
+    const ac = audio.ctx;
+    const osc = ac.createOscillator();
+    const gain = ac.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, ac.currentTime);
+    gain.gain.setValueAtTime(0.0001, ac.currentTime);
+    gain.gain.exponentialRampToValueAtTime(vol, ac.currentTime + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime + dur);
+    osc.connect(gain);
+    gain.connect(audio.master);
+    osc.start();
+    osc.stop(ac.currentTime + dur + 0.02);
+  }
+
+  function noiseHit() {
+    if (!audio || state.mute) return;
+    const ac = audio.ctx;
+    const len = ac.sampleRate * 0.12;
+    const buffer = ac.createBuffer(1, len, ac.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < len; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / len);
+    const src = ac.createBufferSource();
+    const gain = ac.createGain();
+    const filter = ac.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 800;
+    gain.gain.value = 0.13;
+    src.buffer = buffer;
+    src.connect(filter); filter.connect(gain); gain.connect(audio.master);
+    src.start();
+  }
+
+  function resetGame() {
+    state.mode = 'play';
+    state.time = 0;
+    state.startedAt = performance.now();
+    state.score = 0;
+    state.lives = 3;
+    state.combo = 1;
+    state.fever = 0;
+    state.feverTime = 0;
+    state.shieldTime = 0;
+    state.magnetTime = 0;
+    state.slowTime = 0;
+    state.shake = 0;
+    state.spawnTimer = 0;
+    state.bgOffset = 0;
+    state.objects.length = 0;
+    state.particles.length = 0;
+    state.floating.length = 0;
+    state.receipt.length = 0;
+    state.tutorial = true;
+    state.overReason = '';
+    state.queue = [pick(items), pick(items), pick(items)];
+    player.x = player.tx = W * 0.5;
+    player.y = player.ty = H * 0.78;
+    player.vx = player.vy = 0;
+    burst(W * 0.5, H * 0.64, '#ffffff', 22, 2.5, 'START');
+  }
+
+  function gameOver(reason) {
+    state.mode = 'over';
+    state.overReason = reason;
+    state.best = Math.max(state.best, state.score | 0);
+    localStorage.setItem('cartChaosBest', String(state.best));
+    state.rank = getRank(state.score);
+    noiseHit();
+  }
+
+  function getRank(score) {
+    if (score >= 2600) return 'Aisle Demon';
+    if (score >= 1800) return 'Receipt Legend';
+    if (score >= 1150) return 'Mall Menace';
+    if (score >= 650) return 'Cart Goblin';
+    if (score >= 300) return 'Snack Hunter';
+    return 'Cart Rookie';
+  }
+
+  function addQueueItem() {
+    let next = pick(items);
+    if (Math.random() < 0.22 && state.queue.length) next = state.queue[state.queue.length - 1];
+    state.queue.push(next);
+  }
+
+  function spawnObject(forceNeeded = false) {
+    const difficulty = 1 + Math.min(1.9, state.time / 70);
+    let roll = Math.random();
+    let data, kind;
+    if (forceNeeded || roll < 0.56) {
+      kind = 'good';
+      data = forceNeeded || Math.random() < 0.42 ? state.queue[0] : pick(items);
+    } else if (roll < 0.84) {
+      kind = 'hazard';
+      data = pick(hazards);
+    } else if (roll < 0.94) {
+      kind = 'power';
+      data = pick(powers);
+    } else {
+      kind = 'bonus';
+      data = { id: 'gold', icon: '⭐', color: '#fff36a' };
+    }
+    const margin = W * 0.1;
+    const r = kind === 'hazard' ? rand(26, 34) : rand(24, 32);
+    const lane = Math.floor(rand(0, 5));
+    const laneX = W * (0.15 + lane * 0.175) + rand(-18, 18);
+    state.objects.push({
+      kind, id: data.id, icon: data.icon, color: data.color,
+      x: clamp(laneX, margin, W - margin), y: -60,
+      vx: rand(-18, 18), vy: rand(130, 210) * difficulty,
+      r, rot: rand(-0.6, 0.6), spin: rand(-2.2, 2.2),
+      pulse: rand(0, Math.PI * 2), hit: false
+    });
+  }
+
+  function burst(x, y, color, count = 12, power = 1, label = '') {
+    for (let i = 0; i < count; i++) {
+      const a = rand(0, Math.PI * 2);
+      const s = rand(60, 260) * power;
+      state.particles.push({
+        x, y,
+        vx: Math.cos(a) * s,
+        vy: Math.sin(a) * s,
+        life: rand(0.28, 0.65),
+        max: 0.65,
+        r: rand(2, 6) * power,
+        color
+      });
+    }
+    if (label) state.floating.push({ x, y, text: label, life: 0.9, color });
+  }
+
+  function collect(obj) {
+    obj.hit = true;
+    const needed = state.queue[0];
+    if (obj.kind === 'good') {
+      if (obj.id === needed.id) {
+        const gain = Math.round((state.feverTime > 0 ? 24 : 14) * state.combo);
+        state.score += gain;
+        state.combo = Math.min(24, state.combo + 1);
+        state.fever = Math.min(100, state.fever + 9 + state.combo * 0.5);
+        state.receipt.unshift('+' + gain + ' ' + obj.icon);
+        if (state.receipt.length > 5) state.receipt.pop();
+        state.queue.shift();
+        addQueueItem();
+        burst(obj.x, obj.y, obj.color, 16, 1.1, '+' + gain);
+        tone(420 + state.combo * 22, 0.09, 'square', 0.09);
+        if (state.fever >= 100) startFever();
+      } else {
+        wrongHit(obj, 'Wrong item');
+      }
+    } else if (obj.kind === 'hazard') {
+      if (state.shieldTime > 0) {
+        state.score += 18;
+        state.shieldTime = Math.max(0, state.shieldTime - 0.8);
+        burst(obj.x, obj.y, '#8df0ff', 18, 1.15, 'BLOCK');
+        tone(190, 0.07, 'sawtooth', 0.09);
+      } else {
+        wrongHit(obj, 'Cart wrecked');
+      }
+    } else if (obj.kind === 'power') {
+      if (obj.id === 'shield') state.shieldTime = 8;
+      if (obj.id === 'magnet') state.magnetTime = 7;
+      if (obj.id === 'slow') state.slowTime = 6;
+      state.score += 25;
+      burst(obj.x, obj.y, obj.color, 20, 1.25, obj.id.toUpperCase());
+      tone(obj.id === 'slow' ? 280 : 620, 0.12, 'triangle', 0.1);
+    } else if (obj.kind === 'bonus') {
+      const gain = 65 + state.combo * 3;
+      state.score += gain;
+      state.fever = Math.min(100, state.fever + 18);
+      burst(obj.x, obj.y, '#fff36a', 24, 1.35, '+' + gain);
+      tone(880, 0.12, 'sine', 0.12);
+    }
+  }
+
+  function wrongHit(obj, label) {
+    state.combo = 1;
+    state.lives -= 1;
+    state.shake = 16;
+    burst(obj.x, obj.y, '#ff315d', 24, 1.35, label.toUpperCase());
+    noiseHit();
+    if (navigator.vibrate) navigator.vibrate(70);
+    if (state.lives <= 0) gameOver(label);
+  }
+
+  function startFever() {
+    state.fever = 0;
+    state.feverTime = 7.5;
+    state.magnetTime = Math.max(state.magnetTime, 5);
+    state.shake = 10;
+    burst(W * 0.5, H * 0.48, '#fff36a', 44, 1.8, 'FEVER MODE');
+    tone(660, 0.12, 'square', 0.14);
+    setTimeout(() => tone(880, 0.12, 'square', 0.14), 90);
+    setTimeout(() => tone(1120, 0.16, 'square', 0.12), 180);
+  }
+
+  function update(dt) {
+    if (state.mode !== 'play') return;
+    state.time += dt;
+    state.bgOffset += dt * (state.feverTime > 0 ? 170 : 100);
+    state.shake = Math.max(0, state.shake - 55 * dt);
+    state.feverTime = Math.max(0, state.feverTime - dt);
+    state.shieldTime = Math.max(0, state.shieldTime - dt);
+    state.magnetTime = Math.max(0, state.magnetTime - dt);
+    state.slowTime = Math.max(0, state.slowTime - dt);
+
+    const px = player.x, py = player.y;
+    const minY = H * 0.22;
+    const maxY = H * 0.88;
+    if (input.down) {
+      player.tx = clamp(input.x, W * 0.09, W * 0.91);
+      player.ty = clamp(input.y, minY, maxY);
+      state.tutorial = false;
+    }
+    player.x += (player.tx - player.x) * Math.min(1, 12 * dt);
+    player.y += (player.ty - player.y) * Math.min(1, 12 * dt);
+    player.vx = (player.x - px) / Math.max(0.001, dt);
+    player.vy = (player.y - py) / Math.max(0.001, dt);
+    player.tilt = clamp(player.vx / 650, -0.35, 0.35);
+    player.squash = Math.min(0.12, Math.abs(player.vx) / 2400 + Math.abs(player.vy) / 3600);
+
+    const spawnGap = Math.max(0.28, 0.68 - state.time * 0.006 - (state.feverTime > 0 ? 0.14 : 0));
+    state.spawnTimer -= dt;
+    if (state.spawnTimer <= 0) {
+      state.spawnTimer = spawnGap;
+      spawnObject(Math.random() < 0.16);
+    }
+
+    const slowMul = state.slowTime > 0 ? 0.52 : 1;
+    const magnetRange = (state.magnetTime > 0 || state.feverTime > 0) ? player.r * (state.feverTime > 0 ? 6.0 : 4.4) : player.r * 1.45;
+
+    for (const obj of state.objects) {
+      if (obj.hit) continue;
+      const d = dist(player.x, player.y, obj.x, obj.y);
+      if ((obj.kind === 'good' || obj.kind === 'bonus' || obj.kind === 'power') && d < magnetRange) {
+        const pull = (1 - d / magnetRange) * (state.feverTime > 0 ? 760 : 520);
+        obj.vx += ((player.x - obj.x) / Math.max(1, d)) * pull * dt;
+        obj.vy += ((player.y - obj.y) / Math.max(1, d)) * pull * dt;
+      }
+      if (obj.kind === 'hazard' && state.feverTime > 0 && d < player.r * 3.6) {
+        obj.vx += ((obj.x - player.x) / Math.max(1, d)) * 300 * dt;
+      }
+      obj.x += obj.vx * dt;
+      obj.y += obj.vy * dt * slowMul;
+      obj.vx *= (1 - 0.55 * dt);
+      obj.rot += obj.spin * dt;
+      obj.pulse += dt * 4;
+      if (dist(player.x, player.y, obj.x, obj.y) < player.r + obj.r * 0.78) collect(obj);
+    }
+    state.objects = state.objects.filter(o => !o.hit && o.y < H + 90 && o.x > -90 && o.x < W + 90);
+
+    for (const p of state.particles) {
+      p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 380 * dt; p.life -= dt; p.vx *= 0.98;
+    }
+    state.particles = state.particles.filter(p => p.life > 0);
+
+    for (const f of state.floating) { f.y -= 55 * dt; f.life -= dt; }
+    state.floating = state.floating.filter(f => f.life > 0);
+  }
+
+  function roundRect(x, y, w, h, r) {
+    const rr = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + rr, y);
+    ctx.arcTo(x + w, y, x + w, y + h, rr);
+    ctx.arcTo(x + w, y + h, x, y + h, rr);
+    ctx.arcTo(x, y + h, x, y, rr);
+    ctx.arcTo(x, y, x + w, y, rr);
+    ctx.closePath();
+  }
+
+  function draw() {
+    ctx.save();
+    ctx.clearRect(0, 0, W, H);
+    const sx = state.shake ? rand(-state.shake, state.shake) : 0;
+    const sy = state.shake ? rand(-state.shake, state.shake) : 0;
+    ctx.translate(sx, sy);
+    drawBackground();
+    if (state.mode === 'cover') drawCover();
+    if (state.mode === 'play') {
+      drawObjects();
+      drawPlayer();
+      drawParticles();
+      drawHud();
+    }
+    if (state.mode === 'over') {
+      drawObjects();
+      drawPlayer(true);
+      drawParticles();
+      drawGameOver();
+    }
+    ctx.restore();
+  }
+
+  function drawBackground() {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, state.feverTime > 0 ? '#241134' : '#11122a');
+    g.addColorStop(0.55, '#121329');
+    g.addColorStop(1, '#090914');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+
+    const shelfW = W * 0.17;
+    ctx.fillStyle = 'rgba(255,255,255,0.045)';
+    ctx.fillRect(0, 0, shelfW, H);
+    ctx.fillRect(W - shelfW, 0, shelfW, H);
+
+    const step = 72;
+    const off = state.bgOffset % step;
+    for (let y = -step + off; y < H + step; y += step) {
+      ctx.strokeStyle = 'rgba(255,255,255,0.09)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(shelfW, y);
+      ctx.lineTo(W - shelfW, y + 28);
+      ctx.stroke();
+
+      for (let side = 0; side < 2; side++) {
+        const x = side === 0 ? 12 : W - shelfW + 14;
+        ctx.fillStyle = y % (step * 2) < step ? 'rgba(255,211,91,0.10)' : 'rgba(103,215,255,0.10)';
+        roundRect(x, y + 8, shelfW - 26, 36, 10);
+        ctx.fill();
+      }
+    }
+
+    const aisle = ctx.createLinearGradient(W * 0.18, 0, W * 0.82, 0);
+    aisle.addColorStop(0, 'rgba(255,255,255,0.02)');
+    aisle.addColorStop(0.5, 'rgba(255,255,255,0.075)');
+    aisle.addColorStop(1, 'rgba(255,255,255,0.02)');
+    ctx.fillStyle = aisle;
+    ctx.fillRect(W * 0.18, 0, W * 0.64, H);
+
+    if (state.feverTime > 0) {
+      const pulse = 0.25 + 0.18 * Math.sin(state.time * 14);
+      ctx.fillStyle = `rgba(255, 233, 84, ${pulse})`;
+      ctx.fillRect(0, 0, W, H);
+    }
+  }
+
+  function drawCover() {
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    for (let i = 0; i < 30; i++) {
+      const x = (Math.sin(i * 9.12) * 0.5 + 0.5) * W;
+      const y = (i * 73 + performance.now() * 0.025) % H;
+      ctx.font = `${20 + (i % 4) * 6}px Arial`;
+      ctx.fillText(items[i % items.length].icon, x, y);
+    }
+
+    ctx.fillStyle = 'rgba(0,0,0,0.28)';
+    roundRect(W * 0.06, H * 0.10, W * 0.88, H * 0.70, 34);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    ctx.font = `900 ${Math.min(54, W * 0.13)}px Arial Black, Arial`;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText('CART CHAOS', W * 0.5, H * 0.22);
+    ctx.font = `800 ${Math.min(26, W * 0.065)}px Arial`;
+    ctx.fillStyle = '#fff36a';
+    ctx.fillText('ONE MORE ITEM', W * 0.5, H * 0.275);
+
+    drawCart(W * 0.5, H * 0.43, 1.45, Math.sin(performance.now() * 0.004) * 0.16, false);
+
+    ctx.font = `700 ${Math.min(20, W * 0.047)}px Arial`;
+    ctx.fillStyle = 'rgba(255,255,255,0.86)';
+    ctx.fillText('Drag the cart. Grab the list item.', W * 0.5, H * 0.61);
+    ctx.fillText('Dodge red junk. Chain combos. Trigger FEVER.', W * 0.5, H * 0.645);
+
+    const by = H * 0.705 + Math.sin(performance.now() * 0.006) * 4;
+    const bw = W * 0.66, bh = 62;
+    const grad = ctx.createLinearGradient(W * 0.5 - bw / 2, by, W * 0.5 + bw / 2, by + bh);
+    grad.addColorStop(0, '#fff36a');
+    grad.addColorStop(1, '#ff7a59');
+    ctx.fillStyle = grad;
+    roundRect(W * 0.5 - bw / 2, by, bw, bh, 26);
+    ctx.fill();
+    ctx.fillStyle = '#171018';
+    ctx.font = `900 ${Math.min(25, W * 0.062)}px Arial Black, Arial`;
+    ctx.fillText('START RUN', W * 0.5, by + 40);
+
+    ctx.font = `700 13px Arial`;
+    ctx.fillStyle = 'rgba(255,255,255,0.58)';
+    ctx.fillText('Best: ' + state.best, W * 0.5, H * 0.83);
+    ctx.restore();
+  }
+
+  function drawHud() {
+    ctx.save();
+    ctx.textAlign = 'left';
+    ctx.fillStyle = 'rgba(0,0,0,0.32)';
+    roundRect(14, 12, W - 28, 86, 22);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+    ctx.stroke();
+
+    ctx.font = `900 ${Math.min(28, W * 0.07)}px Arial Black, Arial`;
+    ctx.fillStyle = '#fff';
+    ctx.fillText(String(state.score | 0), 28, 48);
+    ctx.font = `700 12px Arial`;
+    ctx.fillStyle = 'rgba(255,255,255,0.56)';
+    ctx.fillText('SCORE', 30, 68);
+
+    ctx.textAlign = 'right';
+    ctx.font = `800 15px Arial`;
+    ctx.fillStyle = '#fff';
+    ctx.fillText('x' + state.combo, W - 28, 42);
+    ctx.fillStyle = 'rgba(255,255,255,0.58)';
+    ctx.font = `700 11px Arial`;
+    ctx.fillText('COMBO', W - 28, 61);
+
+    for (let i = 0; i < 3; i++) {
+      ctx.font = '22px Arial';
+      ctx.textAlign = 'center';
+      ctx.fillStyle = i < state.lives ? '#ff4b72' : 'rgba(255,255,255,0.20)';
+      ctx.fillText('♥', W - 98 + i * 23, 84);
+    }
+
+    const qx = W * 0.31, qy = 24;
+    for (let i = 0; i < 3; i++) {
+      const cardW = 46, cardH = 54, x = qx + i * 52;
+      const active = i === 0;
+      ctx.fillStyle = active ? 'rgba(255,243,106,0.95)' : 'rgba(255,255,255,0.14)';
+      roundRect(x, qy, cardW, cardH, 14);
+      ctx.fill();
+      if (active) {
+        ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2; ctx.stroke();
+      }
+      ctx.font = active ? '25px Arial' : '22px Arial';
+      ctx.fillStyle = '#fff';
+      ctx.textAlign = 'center';
+      ctx.fillText(state.queue[i]?.icon || '•', x + cardW / 2, qy + 36);
+    }
+
+    const fw = W - 54, fh = 9, fy = 107;
+    ctx.fillStyle = 'rgba(255,255,255,0.14)';
+    roundRect(27, fy, fw, fh, 8);
+    ctx.fill();
+    const prog = state.fever / 100;
+    const fg = ctx.createLinearGradient(27, fy, 27 + fw, fy);
+    fg.addColorStop(0, '#fff36a'); fg.addColorStop(1, '#ff4b72');
+    ctx.fillStyle = fg;
+    roundRect(27, fy, fw * prog, fh, 8);
+    ctx.fill();
+
+    ctx.font = '700 10px Arial';
+    ctx.fillStyle = 'rgba(255,255,255,0.55)';
+    ctx.textAlign = 'center';
+    ctx.fillText(state.feverTime > 0 ? 'FEVER ACTIVE' : 'FEVER', W * 0.5, fy + 24);
+
+    drawStatusPills();
+
+    if (state.tutorial) {
+      ctx.textAlign = 'center';
+      ctx.font = `800 ${Math.min(18, W * 0.046)}px Arial`;
+      ctx.fillStyle = 'rgba(255,255,255,0.86)';
+      ctx.fillText('Drag anywhere to steer the cart', W * 0.5, H * 0.58);
+      ctx.font = '36px Arial';
+      ctx.fillText('↕', W * 0.5, H * 0.64 + Math.sin(state.time * 8) * 5);
+    }
+    ctx.restore();
+  }
+
+  function drawStatusPills() {
+    const list = [];
+    if (state.shieldTime > 0) list.push(['SHIELD', state.shieldTime, '#79e7ff']);
+    if (state.magnetTime > 0) list.push(['MAGNET', state.magnetTime, '#ff8a8a']);
+    if (state.slowTime > 0) list.push(['SLOW', state.slowTime, '#83ccff']);
+    if (!list.length) return;
+    let x = 18, y = 132;
+    ctx.font = '800 11px Arial';
+    ctx.textAlign = 'left';
+    for (const [name, t, color] of list) {
+      const w = 64;
+      ctx.fillStyle = 'rgba(0,0,0,0.32)';
+      roundRect(x, y, w, 22, 11); ctx.fill();
+      ctx.fillStyle = color;
+      ctx.fillText(name, x + 9, y + 15);
+      x += w + 7;
+    }
+  }
+
+  function drawObjects() {
+    for (const obj of state.objects) {
+      ctx.save();
+      ctx.translate(obj.x, obj.y);
+      ctx.rotate(obj.rot);
+      const scale = 1 + Math.sin(obj.pulse) * 0.045;
+      ctx.scale(scale, scale);
+
+      ctx.fillStyle = 'rgba(0,0,0,0.22)';
+      ctx.beginPath(); ctx.ellipse(0, obj.r * 0.78, obj.r * 0.95, obj.r * 0.26, 0, 0, Math.PI * 2); ctx.fill();
+
+      let fill = 'rgba(255,255,255,0.92)';
+      if (obj.kind === 'hazard') fill = 'rgba(255,49,93,0.95)';
+      if (obj.kind === 'power') fill = 'rgba(90,220,255,0.94)';
+      if (obj.kind === 'bonus') fill = 'rgba(255,243,106,0.96)';
+      if (obj.kind === 'good' && obj.id === state.queue[0]?.id) fill = 'rgba(148,255,131,0.96)';
+      ctx.fillStyle = fill;
+      roundRect(-obj.r, -obj.r, obj.r * 2, obj.r * 2, obj.r * 0.48);
+      ctx.fill();
+      ctx.strokeStyle = obj.kind === 'hazard' ? '#ffffff' : 'rgba(255,255,255,0.55)';
+      ctx.lineWidth = obj.kind === 'hazard' ? 3 : 2;
+      ctx.stroke();
+
+      ctx.font = `${obj.r * 1.12}px Arial`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#111';
+      ctx.fillText(obj.icon, 0, 2);
+      ctx.restore();
+    }
+  }
+
+  function drawPlayer(frozen = false) {
+    ctx.save();
+    ctx.translate(player.x, player.y);
+    ctx.rotate(frozen ? Math.sin(performance.now() * 0.002) * 0.05 : player.tilt);
+    const sX = 1 + player.squash;
+    const sY = 1 - player.squash * 0.7;
+    ctx.scale(sX, sY);
+    drawCart(0, 0, 1, 0, true);
+
+    if (state.shieldTime > 0) {
+      ctx.strokeStyle = `rgba(121,231,255,${0.45 + 0.2 * Math.sin(state.time * 8)})`;
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.arc(0, -2, player.r * 1.55, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    if (state.magnetTime > 0 || state.feverTime > 0) {
+      ctx.strokeStyle = state.feverTime > 0 ? 'rgba(255,243,106,0.32)' : 'rgba(255,98,98,0.22)';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(0, 0, player.r * (state.feverTime > 0 ? 3.8 : 2.5), 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawCart(cx, cy, scale = 1, tilt = 0, local = false) {
+    ctx.save();
+    if (!local) { ctx.translate(cx, cy); ctx.rotate(tilt); }
+    ctx.scale(scale, scale);
+
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    ctx.beginPath(); ctx.ellipse(0, 34, 52, 11, 0, 0, Math.PI * 2); ctx.fill();
+
+    ctx.strokeStyle = '#d8f4ff';
+    ctx.lineWidth = 5;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(-36, -26); ctx.lineTo(35, -20); ctx.lineTo(27, 22); ctx.lineTo(-28, 22); ctx.closePath();
+    ctx.stroke();
+
+    const g = ctx.createLinearGradient(-34, -26, 34, 28);
+    g.addColorStop(0, '#83eaff'); g.addColorStop(1, '#fff36a');
+    ctx.fillStyle = g;
+    ctx.globalAlpha = 0.28;
+    roundRect(-35, -24, 70, 47, 12); ctx.fill();
+    ctx.globalAlpha = 1;
+
+    ctx.strokeStyle = 'rgba(255,255,255,0.66)';
+    ctx.lineWidth = 2;
+    for (let x = -22; x <= 22; x += 15) {
+      ctx.beginPath(); ctx.moveTo(x, -18); ctx.lineTo(x - 4, 18); ctx.stroke();
+    }
+    for (let y = -9; y <= 10; y += 11) {
+      ctx.beginPath(); ctx.moveTo(-30, y); ctx.lineTo(29, y + 2); ctx.stroke();
+    }
+
+    ctx.strokeStyle = '#d8f4ff';
+    ctx.lineWidth = 6;
+    ctx.beginPath(); ctx.moveTo(35, -20); ctx.lineTo(51, -37); ctx.stroke();
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(-21, 32, 7, 0, Math.PI * 2); ctx.arc(24, 32, 7, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#11122a';
+    ctx.beginPath(); ctx.arc(-21, 32, 3, 0, Math.PI * 2); ctx.arc(24, 32, 3, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+
+  function drawParticles() {
+    for (const p of state.particles) {
+      const a = clamp(p.life / p.max, 0, 1);
+      ctx.globalAlpha = a;
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r * a, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    for (const f of state.floating) {
+      ctx.save();
+      ctx.globalAlpha = clamp(f.life / 0.9, 0, 1);
+      ctx.textAlign = 'center';
+      ctx.font = `900 ${Math.min(22, W * 0.052)}px Arial Black, Arial`;
+      ctx.lineWidth = 5;
+      ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+      ctx.strokeText(f.text, f.x, f.y);
+      ctx.fillStyle = f.color || '#fff';
+      ctx.fillText(f.text, f.x, f.y);
+      ctx.restore();
+    }
+  }
+
+  function drawGameOver() {
+    ctx.save();
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = 'center';
+
+    const panelX = W * 0.07, panelY = H * 0.16, panelW = W * 0.86, panelH = H * 0.66;
+    ctx.fillStyle = 'rgba(255,255,255,0.11)';
+    roundRect(panelX, panelY, panelW, panelH, 34); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.20)'; ctx.lineWidth = 2; ctx.stroke();
+
+    ctx.font = `900 ${Math.min(38, W * 0.095)}px Arial Black, Arial`;
+    ctx.fillStyle = '#fff';
+    ctx.fillText('RECEIPT CRASHED', W * 0.5, panelY + 62);
+    ctx.font = `800 ${Math.min(18, W * 0.046)}px Arial`;
+    ctx.fillStyle = '#ff879d';
+    ctx.fillText(state.overReason || 'Cart wrecked', W * 0.5, panelY + 95);
+
+    ctx.font = `900 ${Math.min(58, W * 0.145)}px Arial Black, Arial`;
+    ctx.fillStyle = '#fff36a';
+    ctx.fillText(String(state.score | 0), W * 0.5, panelY + 170);
+    ctx.font = `800 ${Math.min(22, W * 0.055)}px Arial`;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(state.rank, W * 0.5, panelY + 205);
+
+    ctx.font = `700 ${Math.min(15, W * 0.038)}px Arial`;
+    ctx.fillStyle = 'rgba(255,255,255,0.68)';
+    ctx.fillText('Best Score: ' + state.best, W * 0.5, panelY + 235);
+
+    const lines = state.receipt.length ? state.receipt : ['No clean receipt. Try again.'];
+    ctx.fillStyle = 'rgba(0,0,0,0.26)';
+    roundRect(panelX + 28, panelY + 255, panelW - 56, 96, 20); ctx.fill();
+    ctx.font = `700 ${Math.min(16, W * 0.041)}px Arial`;
+    ctx.fillStyle = 'rgba(255,255,255,0.80)';
+    for (let i = 0; i < Math.min(4, lines.length); i++) ctx.fillText(lines[i], W * 0.5, panelY + 284 + i * 21);
+
+    const bw = panelW - 70, bh = 58, by = panelY + panelH - 92;
+    const grad = ctx.createLinearGradient(panelX + 35, by, panelX + 35 + bw, by + bh);
+    grad.addColorStop(0, '#fff36a'); grad.addColorStop(1, '#ff7a59');
+    ctx.fillStyle = grad;
+    roundRect(panelX + 35, by, bw, bh, 25); ctx.fill();
+    ctx.fillStyle = '#161018';
+    ctx.font = `900 ${Math.min(23, W * 0.058)}px Arial Black, Arial`;
+    ctx.fillText('RUN AGAIN', W * 0.5, by + 37);
+
+    ctx.font = '700 12px Arial';
+    ctx.fillStyle = 'rgba(255,255,255,0.48)';
+    ctx.fillText(state.mute ? 'Sound: OFF' : 'Sound: ON', W * 0.5, panelY + panelH - 23);
+    ctx.restore();
+  }
+
+  function pointerPos(e) {
+    const t = e.touches && e.touches[0] ? e.touches[0] : e.changedTouches && e.changedTouches[0] ? e.changedTouches[0] : e;
+    return { x: t.clientX, y: t.clientY };
+  }
+
+  function down(e) {
+    e.preventDefault();
+    const p = pointerPos(e);
+    input.down = true; input.x = p.x; input.y = p.y;
+    if (state.mode === 'cover') {
+      initAudio();
+      resetGame();
+    } else if (state.mode === 'over') {
+      initAudio();
+      resetGame();
+    }
+  }
+
+  function move(e) {
+    e.preventDefault();
+    const p = pointerPos(e);
+    input.x = p.x; input.y = p.y; input.justMoved = true;
+  }
+
+  function up(e) {
+    e.preventDefault();
+    input.down = false;
+  }
+
+  function key(e) {
+    if (e.key === 'm' || e.key === 'M') state.mute = !state.mute;
+    if ((e.key === ' ' || e.key === 'Enter') && state.mode !== 'play') {
+      initAudio(); resetGame();
+    }
+  }
+
+  canvas.addEventListener('touchstart', down, { passive: false });
+  canvas.addEventListener('touchmove', move, { passive: false });
+  canvas.addEventListener('touchend', up, { passive: false });
+  canvas.addEventListener('mousedown', down);
+  window.addEventListener('mousemove', e => { if (input.down) move(e); });
+  window.addEventListener('mouseup', up);
+  window.addEventListener('keydown', key);
+  window.addEventListener('resize', resize);
+
+  function loop(now) {
+    if (!state.last) state.last = now;
+    const dt = Math.min(0.033, (now - state.last) / 1000);
+    state.last = now;
+    update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  resize();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
